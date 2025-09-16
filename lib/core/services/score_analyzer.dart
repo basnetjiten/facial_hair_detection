@@ -220,7 +220,9 @@ class ImageRegionAnalyzer {
             .floor();
     double darkSum = 0.0;
     final keepCount = dsSorted.length - keepStart;
-    for (int i = keepStart; i < dsSorted.length; i++) darkSum += dsSorted[i];
+    for (int i = keepStart; i < dsSorted.length; i++) {
+      darkSum += dsSorted[i];
+    }
     final darknessScore = (keepCount > 0 ? (darkSum / keepCount) : 0.0).clamp(
       0.0,
       1.0,
@@ -255,7 +257,9 @@ class ImageRegionAnalyzer {
     // Robust normalization
     final p95 = _percentileF32(contrib, 0.95);
     double contribSum = 0.0;
-    for (int i = 0; i < total; i++) contribSum += contrib[i];
+    for (int i = 0; i < total; i++) {
+      contribSum += contrib[i];
+    }
 
     final edgeScore =
         (candidateCount > 0 && p95 > _eps)
@@ -273,185 +277,6 @@ class ImageRegionAnalyzer {
     return (0.2126 * r + 0.7152 * g + 0.0722 * b);
   }
 
-  /// Scores a region with OpenCV: edge (Sobel), darkness (skin-normalized), and saturation.
-  /// Returns a value in [0..1].
-  ///
-  /// Requires: opencv_dart: ^1.4.3
-  ///
-  /// Notes:
-  /// - We convert the cropped region (package:image) -> PNG bytes -> OpenCV Mat via imdecode.
-  /// - All per-pixel reads use Mat.atF32 to avoid type issues.
-  // static double scoreRegionWithOpenCV({
-  //   required img.Image src,
-  //   required int x,
-  //   required int y,
-  //   required int w,
-  //   required int h,
-  //   double percentileThreshold =
-  //       0.35, // top fraction of darkest (skin-normalized) pixels
-  //   double edgeWeight = 0.7,
-  //   double darknessWeight = 0.3,
-  //   double saturationPower = 1.5,
-  // })  {
-  //   // --- Clamp region to the image bounds
-  //   final x0 = x.clamp(0, src.width);
-  //   final y0 = y.clamp(0, src.height);
-  //   final x1 = math.min(x0 + w, src.width);
-  //   final y1 = math.min(y0 + h, src.height);
-  //   final rw = x1 - x0;
-  //   final rh = y1 - y0;
-  //   if (rw < 3 || rh < 3) return 0.0;
-  //
-  //   // Ensure weights sum to 1
-  //   {
-  //     final tw = edgeWeight + darknessWeight;
-  //     if ((tw - 1.0).abs() > 1e-6) {
-  //       edgeWeight /= tw;
-  //       darknessWeight /= tw;
-  //     }
-  //   }
-  //
-  //   // --- Crop region with package:image, then encode to bytes and imdecode as Mat
-  //   final region = img.copyCrop(src, x: x0, y: y0, width: rw, height: rh);
-  //   final regionBytes = Uint8List.fromList(img.encodePng(region));
-  //   cv.Mat m = cv.imdecode(regionBytes, cv.IMREAD_UNCHANGED);
-  //
-  //   // --- Normalize channels to RGB
-  //   // OpenCV expects BGR normally, but we’ll work in RGB->HSV and RGB->GRAY consistently.
-  //   // If you prefer BGR, adjust color codes accordingly.
-  //   if (m.channels == 4) {
-  //     m = cv.cvtColor(m, cv.COLOR_RGBA2RGB);
-  //   } else if (m.channels == 1) {
-  //     m = cv.cvtColor(m, cv.COLOR_GRAY2RGB);
-  //   } else if (m.channels != 3) {
-  //     // Fallback: force to 3-channel
-  //     m = cv.cvtColor(m, cv.COLOR_BGRA2BGR);
-  //   }
-  //
-  //   // --- SATURATION (S channel of HSV) in [0..1]
-  //   final hsv = cv.cvtColor(m, cv.COLOR_RGB2HSV);
-  //   final hsvChannels = cv.split(hsv); // VecMat
-  //   cv.Mat s8 = hsvChannels[1]; // saturation 8u (0..255)
-  //   cv.Mat s32 = s8.convertTo(cv.MatType.CV_32FC1, alpha: 1.0 / 255.0); // 0..1
-  //
-  //   // --- LUMINANCE (GRAY) and SKIN BASELINE (blurred GRAY), both in [0..1]
-  //   final gray8 = cv.cvtColor(m, cv.COLOR_RGB2GRAY);
-  //   final gray32 = gray8.convertTo(cv.MatType.CV_32FC1, alpha: 1.0 / 255.0);
-  //
-  //   // Gaussian blur to estimate local "skin" baseline (smoother background)
-  //   final grayBlur8 = cv.gaussianBlur(gray8, (5, 5), 1.0);
-  //   final grayBlur32 = grayBlur8.convertTo(
-  //     cv.MatType.CV_32FC1,
-  //     alpha: 1.0 / 255.0,
-  //   );
-  //
-  //   // --- EDGES: Sobel magnitude (float). Use CV_32F derivatives.
-  //   final dx = cv.sobel(gray8, cv.MatType.CV_32F, 1, 0, ksize: 3);
-  //   final dy = cv.sobel(gray8, cv.MatType.CV_32F, 0, 1, ksize: 3);
-  //
-  //   // We'll compute magnitude per-pixel and also gather values to get p95 later.
-  //   final width = m.cols;
-  //   final height = m.rows;
-  //
-  //   // Pre-allocate buffers we’ll use for robust normalization and darkness percentile.
-  //   final List<double> edgeMags = List<double>.filled(
-  //     width * height,
-  //     0.0,
-  //     growable: false,
-  //   );
-  //   final List<double> darkSkinVals = List<double>.filled(
-  //     width * height,
-  //     0.0,
-  //     growable: false,
-  //   );
-  //
-  //   // Compute magnitude and skin-normalized darkness in one pass.
-  //   // Also track max magnitude to avoid an extra pass if you prefer max-norm.
-  //   double maxMag = 0.0;
-  //   const double eps = 1e-6;
-  //
-  //   int idx = 0;
-  //   for (int j = 0; j < height; j++) {
-  //     for (int i = 0; i < width; i++, idx++) {
-  //       final gx = dx.atF32(j, i1: i); // CV_32F ensures a double here
-  //       final gy = dy.atF32(j, i1: i);
-  //       final mag = math.sqrt(
-  //         gx * gx + gy * gy,
-  //       ); // Sobel magnitude (float, unnormalized)
-  //       edgeMags[idx] = mag;
-  //       if (mag > maxMag) maxMag = mag;
-  //
-  //       final g = gray32.atF32(j, i1: i); // [0..1]
-  //       final gb = grayBlur32.atF32(j, i1: i); // [0..1]
-  //       // Skin-normalized "darkness": how much darker than local baseline
-  //       final ds = math.max(0.0, (gb - g) / (gb + eps)); // [0..1]
-  //       darkSkinVals[idx] = ds;
-  //     }
-  //   }
-  //
-  //   if (maxMag <= eps) {
-  //     // No edge energy at all; fall back to darkness only.
-  //     // Darkness score: mean of the top `percentileThreshold` fraction of ds.
-  //     final darknessScore = _topFractionMean(darkSkinVals, percentileThreshold);
-  //     return (edgeWeight * 0.0 + darknessWeight * darknessScore).clamp(
-  //       0.0,
-  //       1.0,
-  //     );
-  //   }
-  //
-  //   // Robust edge normalization using p95 (less sensitive to outliers)
-  //   final p95 = _percentile(edgeMags, 0.95);
-  //   final normDiv = p95 > eps ? p95 : maxMag;
-  //
-  //   // Final scoring pass: combine edge * darkness * (1 - saturation)^power
-  //   double contribSum = 0.0;
-  //   int candidateCount = 0;
-  //
-  //   idx = 0;
-  //   for (int j = 0; j < height; j++) {
-  //     for (int i = 0; i < width; i++, idx++) {
-  //       final magN = (edgeMags[idx] / normDiv).clamp(0.0, 1.0);
-  //       final ds = darkSkinVals[idx]; // already [0..1]
-  //       final sVal = s32.atF32(j, i1: i); // [0..1]
-  //       final satBoost = math.pow(1.0 - sVal, saturationPower) as double;
-  //
-  //       if (magN > 0.0 && ds > 0.0) {
-  //         contribSum += magN * ds * satBoost;
-  //         candidateCount++;
-  //       }
-  //     }
-  //   }
-  //
-  //   final edgeScore = (candidateCount > 0 ? (contribSum / candidateCount) : 0.0)
-  //       .clamp(0.0, 1.0);
-  //   final darknessScore = _topFractionMean(darkSkinVals, percentileThreshold);
-  //
-  //   final score = (edgeWeight * edgeScore + darknessWeight * darknessScore)
-  //       .clamp(0.0, 1.0);
-  //   return score;
-  // }
-  //
-  // /// Mean of the top `fraction` values (fraction in 0..1).
-  // static double _topFractionMean(List<double> values, double fraction) {
-  //   if (values.isEmpty) return 0.0;
-  //   fraction = fraction.clamp(0.0, 1.0);
-  //   if (fraction <= 0.0) return 0.0;
-  //
-  //   final v = List<double>.from(values)..sort();
-  //   final keep = (v.length * fraction).floor().clamp(1, v.length);
-  //   double sum = 0.0;
-  //   for (int i = v.length - keep; i < v.length; i++) sum += v[i];
-  //   return (sum / keep).clamp(0.0, 1.0);
-  // }
-  //
-  // /// Percentile in [0..1]; returns a robust representative value.
-  // static double _percentile(List<double> values, double p) {
-  //   if (values.isEmpty) return 0.0;
-  //   final v = List<double>.from(values)..sort();
-  //   final idx = (p.clamp(0.0, 1.0) * (v.length - 1)).floor();
-  //   return v[idx];
-  // }
-
   static double _scoreRegionWithOpenCV({
     required img.Image region,
     required int x,
@@ -464,15 +289,14 @@ class ImageRegionAnalyzer {
     required double saturationPower,
     double saturationFloor = 0.2, // prevents colorful areas from wiping edges
   }) {
-
-   // final bounds = _clampRegion(src, x, y, w, h);
-   //  final region = img.copyCrop(
-   //    src,
-   //    x:x,
-   //    y: y,
-   //    width: w,
-   //    height:h,
-   //  );
+    // final bounds = _clampRegion(src, x, y, w, h);
+    //  final region = img.copyCrop(
+    //    src,
+    //    x:x,
+    //    y: y,
+    //    width: w,
+    //    height:h,
+    //  );
     _storeImage(region);
     final totalPixels = w * h;
     if (totalPixels < 9) return 0.0;
@@ -1016,8 +840,6 @@ class ImageRegionAnalyzer {
   }
 
   static void _storeImage(region) async {
-
-
     // 2) Encode (PNG keeps transparency; use encodeJpg for smaller files)
     final Uint8List bytes = Uint8List.fromList(img.encodePng(region));
 
@@ -1028,7 +850,6 @@ class ImageRegionAnalyzer {
     // 4) Write file
     final file = File('${dir!.path}/cropped_region.png');
     await file.writeAsBytes(bytes, flush: true);
-    print('FILE UPLOADED ${file.path}');
   }
 }
 
